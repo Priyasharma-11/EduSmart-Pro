@@ -1,0 +1,9 @@
+streamlit
+pandas
+plotly
+groq
+PyPDF2
+python-docx
+pytesseract
+Pillow
+streamlit-mic-recorder
