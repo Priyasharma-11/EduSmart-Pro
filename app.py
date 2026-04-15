@@ -22,7 +22,6 @@ if not os.path.exists("materials"):
 
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-
 # ==========================================
 # 2. YOUR ORIGINAL HELPER FUNCTIONS
 # ==========================================
@@ -80,16 +79,18 @@ def extract_text(file):
     return text
 
 
-def get_prompt(mode, study_feature):
+def get_prompt(mode, study_feature, lang ="English"):
+    base_instructions = f"IMPORTANT: You must provide all explanations and content in {lang}."
+
     if mode == "Coding":
-        return "You are a coding expert. Give clean, optimized code with short explanation."
+        return f"You are a coding expert.{base_instructions} Give clean, optimized code with short explanation."
 
     elif mode == "Analyst":
-        return "You are a data analyst. Explain insights, charts, and trends clearly."
+        return f"You are a data analyst.{base_instructions} Explain insights, charts, and trends clearly."
 
     elif mode == "Study":
         if study_feature == "Flashcards":
-            return """
+            return f"""{base_instructions}
             Create 10 Flashcards. 
             STRICT FORMAT for each card:
             Front: [Question or term]
@@ -99,8 +100,9 @@ def get_prompt(mode, study_feature):
             """
 
         elif study_feature == "Quiz":
-            return """
-            Create 5 Multiple Choice Questions. 
+            # ADDED: Bloom's Taxonomy Instruction
+            return f"""{base_instructions}
+            Create 5 Multiple Choice Questions based on Bloom's Taxonomy (mix of Remembering, Applying, and Analyzing levels). 
             Format each question EXACTLY like this:
             Q: [Question text]
             A: [Correct Option Letter, e.g., a]
@@ -113,13 +115,13 @@ def get_prompt(mode, study_feature):
             """
 
         elif study_feature == "Quick Notes":
-            return "Give short revision notes in bullet points."
+            return f"{base_instructions}Give short revision notes in bullet points."
 
         else:
-            return "You are a tutor. Explain the topic simply with examples."
+            return f"You are a tutor.{base_instructions} Explain the topic simply with examples."
 
     else:
-        return "You are a helpful assistant. Keep answers short and clear."
+        return f"You are a helpful assistant. Keep answers short and clear.{base_instructions}"
 
 
 
@@ -259,19 +261,34 @@ else:
 
     elif choice == "Manage Marks":
         st.header("📝 Student Marks Management")
+        # Ensure the directory for storing mark CSVs exists
+        marks_dir = "student_marks_files"
+        if not os.path.exists(marks_dir):
+            os.makedirs(marks_dir)
+
         target_class = st.selectbox("Select Class", ["ITDS-SEM 4", "CTIS-SEM 6", "ITDS-SEM 7"])
+        sub_cat = st.selectbox("Subject Category",["Machine Learning","PYTHON", "Data Analytics", "COMPUTER NETWORKS"])
+
         tab1, tab2 = st.tabs(["📤 Bulk Upload", "✍️ Manual Entry"])
+
         with tab1:
             csv = st.file_uploader("Upload CSV", type=['csv'])
             if csv and st.button("Confirm Import"):
+                # 1. Save the physical file so it shows in the list
+                file_path = os.path.join(marks_dir, f"{target_class}_{csv.name}")
+                with open(file_path, "wb") as f:
+                    f.write(csv.getbuffer())
+
+
                 df_up = pd.read_csv(csv)
                 df_up.rename(columns={'Name': 'student_name', 'Subject': 'subject', 'Score': 'score',
                                       'Attendance': 'attendance'}, inplace=True)
                 df_up['class_name'] = target_class
                 conn = db.create_connection()
                 df_up.to_sql('marks', conn, if_exists='append', index=False)
-                conn.close();
-                st.success("Imported!")
+                conn.close()
+                st.success(f"Imported successfully and saved {csv.name}!")
+
         with tab2:
             with st.form("manual"):
                 n, s, sc, at = st.text_input("Name"), st.selectbox("Subject", ["MACHINE LEARNING", "PYTHON",
@@ -281,9 +298,64 @@ else:
                 if st.form_submit_button("Save Student"):
                     conn = db.create_connection()
                     conn.execute("INSERT INTO marks VALUES (?,?,?,?,?)", (n, s, sc, at, target_class))
-                    conn.commit();
-                    conn.close();
+                    conn.commit()
+                    conn.close()
                     st.success("Saved!")
+
+
+        st.divider()
+        st.subheader("📂 Uploaded Marks Files")
+
+        if os.path.exists(marks_dir):
+            # Only show files for the selected class to keep it clean
+            files = [f for f in os.listdir(marks_dir) if f.startswith(target_class)]
+
+            if not files:
+                st.info(f"No files uploaded for {target_class} yet.")
+            else:
+                for file_name in files:
+                    col1, col2 = st.columns([0.8, 0.2])
+                    col1.text(f"📄 {file_name}")
+
+                    # This button is now safe because it is NOT inside st.form
+                    if col2.button("🗑️", key=f"del_file_{file_name}"):
+                        os.remove(os.path.join(marks_dir, file_name))
+                        st.toast(f"Removed {file_name}")
+                        st.rerun()
+
+                # --- 📋 DATABASE RECORDS VIEW ---
+                with st.expander("🔍 View All Database Records for this Class"):
+                    conn = db.create_connection()
+                    rec_df = pd.read_sql_query("SELECT student_name, subject, score FROM marks WHERE class_name=?",
+                                               conn, params=(target_class,))
+                    conn.close()
+                    st.dataframe(rec_df, use_container_width=True)
+
+        st.divider()
+        st.subheader(f"📋 Current Records for {target_class}")
+
+        conn = db.create_connection()
+        # Fetch current records for this class
+        records_df = pd.read_sql_query("SELECT rowid, student_name, subject, score FROM marks WHERE class_name=?",
+                                       conn, params=(target_class,))
+        conn.close()
+
+        if records_df.empty:
+            st.info("No records found for this class.")
+        else:
+            for index, row in records_df.iterrows():
+                col1, col2 = st.columns([0.8, 0.2])
+                # Show record info
+                col1.text(f"👤 {row['student_name']} | 📚 {row['subject']} | ⭐ {row['score']}%")
+
+                # Delete button with unique key using rowid
+                if col2.button("🗑️", key=f"del_mark_{row['rowid']}"):
+                    conn = db.create_connection()
+                    conn.execute("DELETE FROM marks WHERE rowid=?", (row['rowid'],))
+                    conn.commit()
+                    conn.close()
+                    st.toast(f"Deleted record for {row['student_name']}")
+                    st.rerun()
 
     elif choice == "Upload Materials":
         st.header("📂 Upload Study Materials")
@@ -452,12 +524,33 @@ else:
 
         mode = st.sidebar.selectbox("Choose Assistant Mode", ["General", "Coding", "Analyst", "Study"])
 
+        # --- MULTILINGUAL SUPPORT ---
+        target_lang = st.sidebar.selectbox("🌍 Study in My Language",
+                                           ["English", "Hindi", "Marathi", "Spanish", "French"])
+
+        # --- GAMIFICATION (STREAK & POINTS) ---
+        if "streak" not in st.session_state: st.session_state.streak = 1
+        if "points" not in st.session_state: st.session_state.points = 0
+
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🏆 Your Achievements")
+        st.sidebar.write(f"🔥 **{st.session_state.streak} Day Study Streak**")
+        # Progress bar for "Study Warrior" badge
+        progress = min(st.session_state.points / 100, 1.0)
+        st.sidebar.progress(progress)
+        if st.session_state.points >= 100:
+            st.sidebar.success("🏅 Badge Unlocked: Study Warrior")
+        else:
+            st.sidebar.caption(f"Collect {100 - st.session_state.points} more points for your next badge!")
+
+
+
         study_feature = None
         if mode == "Study":
             study_feature = st.sidebar.radio("Study Tools", ["Normal", "Flashcards", "Quick Notes", "Quiz"])
 
         # 4. Input Handling
-        # --- 4. INPUT HANDLING (Final Fix) ---
+
         user_input = None
 
         with st.sidebar:
@@ -494,8 +587,8 @@ else:
             with st.chat_message(message["role"]):
                 st.write(message["content"])
 
-        # 🤖 AI RESPONSE (Corrected to prevent loops)
-        # 🤖 AI RESPONSE (The "Cloud Architecture" Fix)
+        # 🤖 AI RESPONSE ( to prevent loops)
+
         if user_input and user_input != st.session_state.get('last_processed_input'):
             st.session_state.last_processed_input = user_input
 
@@ -515,7 +608,7 @@ else:
             st.session_state.messages.append({"role": "user", "content": user_input})
 
             with st.chat_message("assistant"):
-                system_prompt = {"role": "system", "content": get_prompt(mode, study_feature)}
+                system_prompt = {"role": "system", "content": get_prompt(mode, study_feature,target_lang)}
 
                 with st.spinner("🤖 Thinking..."):
                     response = client.chat.completions.create(
@@ -538,7 +631,7 @@ else:
                 st.session_state.messages.append({"role": "assistant", "content": response_text})
                 st.rerun()
 
-        # --- 6. Interactive UI (The "Click to Check" Part) ---
+
         # --- 6. Interactive UI (Final Stable Version) ---
         if mode == "Study" and study_feature == "Quiz" and st.session_state.quiz_data:
             st.divider()
@@ -585,7 +678,48 @@ else:
                                 st.session_state.quiz_answers[f"q_{i}"] = current_char
                                 st.rerun()
 
-                    st.write("---")  # Visual line between questions
+                    st.write("---") # Visual line between questions
+
+                if st.session_state.quiz_answers:
+                    st.divider()
+                    st.subheader("📊 Cognitive Strength Analysis (Bloom's Taxonomy)")
+
+                    wrong_questions = []
+                    for i, item in enumerate(st.session_state.quiz_data):
+                        ans = st.session_state.quiz_answers.get(f"q_{i}")
+                        # If they have answered, check if it's wrong
+                        if ans and ans != item['correct']:
+                            wrong_questions.append(item['q'])
+
+                    # Only show the dashboard once they've finished or started answering
+                    total = len(st.session_state.quiz_data)
+                    correct = total - len(wrong_questions)
+                    score_pct = (correct / total) * 100
+
+                    c1, c2 = st.columns(2)
+                    c1.metric("Quiz Accuracy", f"{score_pct}%")
+
+                    # Determine if they finished the quiz
+                    if len(st.session_state.quiz_answers) == total:
+                        if score_pct < 100:
+                            st.warning(
+                                f"⚠️ **Learning Gap Identified:** You missed {len(wrong_questions)} questions. The AI detects a gap in your 'Application' of these concepts.")
+
+                            if st.button("🪄 Generate AI Smart Study Plan"):
+                                with st.spinner("Analyzing your gaps..."):
+                                    gap_text = ", ".join(wrong_questions)
+                                    smart_res = client.chat.completions.create(
+                                        model="llama-3.1-8b-instant",
+                                        messages=[{"role": "user",
+                                                   "content": f"Based on these missed questions: {gap_text}, provide a 15-minute quick study plan to fix these gaps in {target_lang}."}]
+                                    )
+                                    st.info(smart_res.choices[0].message.content)
+                                    st.session_state.points += 20
+                        else:
+                            st.balloons()
+                            st.success("Perfect Score! You've mastered this topic at all cognitive levels.")
+                            st.session_state.points += 50
+
         # --- 7. Interactive Flashcards UI ---
         if mode == "Study" and study_feature == "Flashcards" and "flashcards" in st.session_state:
             if st.session_state.flashcards:
